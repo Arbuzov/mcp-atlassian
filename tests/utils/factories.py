@@ -12,7 +12,7 @@ class JiraIssueFactory:
         defaults = {
             "id": "12345",
             "key": key,
-            "self": f"https://test.atlassian.net/rest/api/3/issue/{key}",
+            "self": f"https://test.atlassian.net/rest/api/latest/issue/{key}",
             "fields": {
                 "summary": "Test Issue Summary",
                 "description": "Test issue description",

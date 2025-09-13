@@ -116,7 +116,7 @@ class TestLinksMixin:
         assert response["link_url"] == "https://example.com/page"
         assert response["relationship"] == "documentation"
         links_mixin.jira.post.assert_called_once_with(
-            "rest/api/3/issue/PROJ-123/remotelink", json=link_data
+            "rest/api/latest/issue/PROJ-123/remotelink", json=link_data
         )
 
     def test_create_remote_issue_link_missing_issue_key(self, links_mixin):
