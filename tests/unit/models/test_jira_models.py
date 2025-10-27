@@ -1204,7 +1204,7 @@ class TestJiraProject:
                 "displayName": "John Doe",
                 "active": True,
             },
-            "self": "https://example.atlassian.net/rest/api/3/project/10000",
+            "self": "https://example.atlassian.net/rest/api/latest/project/10000",
             "projectCategory": {
                 "id": "10100",
                 "name": "Software Projects",
@@ -1222,7 +1222,9 @@ class TestJiraProject:
         assert project.description == "This is a test project"
         assert project.lead is not None
         assert project.lead.display_name == "John Doe"
-        assert project.url == "https://example.atlassian.net/rest/api/3/project/10000"
+        assert (
+            project.url == "https://example.atlassian.net/rest/api/latest/project/10000"
+        )
         assert project.category_name == "Software Projects"
         assert (
             project.avatar_url
@@ -1253,7 +1255,7 @@ class TestJiraProject:
                 "displayName": "John Doe",
                 "active": True,
             },
-            "self": "https://example.atlassian.net/rest/api/3/project/10000",
+            "self": "https://example.atlassian.net/rest/api/latest/project/10000",
             "projectCategory": {
                 "name": "Software Projects",
             },
@@ -1355,7 +1357,7 @@ class TestJiraIssueLinkType:
             "name": "Blocks",
             "inward": "is blocked by",
             "outward": "blocks",
-            "self": "https://example.atlassian.net/rest/api/3/issueLinkType/10001",
+            "self": "https://example.atlassian.net/rest/api/latest/issueLinkType/10001",
         }
         link_type = JiraIssueLinkType.from_api_response(data)
         assert link_type.id == "10001"
@@ -1364,7 +1366,7 @@ class TestJiraIssueLinkType:
         assert link_type.outward == "blocks"
         assert (
             link_type.self_url
-            == "https://example.atlassian.net/rest/api/3/issueLinkType/10001"
+            == "https://example.atlassian.net/rest/api/latest/issueLinkType/10001"
         )
 
     def test_from_api_response_with_empty_data(self):
@@ -1392,7 +1394,7 @@ class TestJiraIssueLinkType:
             name="Blocks",
             inward="is blocked by",
             outward="blocks",
-            self_url="https://example.atlassian.net/rest/api/3/issueLinkType/10001",
+            self_url="https://example.atlassian.net/rest/api/latest/issueLinkType/10001",
         )
         simplified = link_type.to_simplified_dict()
         assert isinstance(simplified, dict)
@@ -1403,7 +1405,7 @@ class TestJiraIssueLinkType:
         assert "self" in simplified
         assert (
             simplified["self"]
-            == "https://example.atlassian.net/rest/api/3/issueLinkType/10001"
+            == "https://example.atlassian.net/rest/api/latest/issueLinkType/10001"
         )
 
 
