@@ -808,8 +808,21 @@ async def add_comment(
 @check_write_access
 async def attach_file(
     ctx: Context,
-    file_path: Annotated[
-        str, Field(description="Local path to the file that should be attached")
+    filename: Annotated[
+        str,
+        Field(
+            description="Name of the file to attach (e.g., 'document.pdf', 'image.png')"
+        ),
+    ],
+    file_content_base64: Annotated[
+        str,
+        Field(
+            description=(
+                "Base64-encoded content of the file to attach. "
+                "Since the MCP server runs in Docker and cannot access host files, "
+                "you must provide the file content encoded as base64 string."
+            )
+        ),
     ],
     page_id: Annotated[
         str | None,
@@ -839,8 +852,8 @@ async def attach_file(
         str | None,
         Field(
             description=(
-                "Optional name for the attachment. "
-                "Defaults to the filename when not provided"
+                "Optional display name for the attachment. "
+                "If not provided, uses the filename parameter"
             ),
             default=None,
         ),
@@ -848,7 +861,10 @@ async def attach_file(
     content_type: Annotated[
         str | None,
         Field(
-            description="Optional MIME type for the attachment payload",
+            description=(
+                "Optional MIME type for the attachment "
+                "(e.g., 'application/pdf', 'image/png')"
+            ),
             default=None,
         ),
     ] = None,
@@ -862,13 +878,17 @@ async def attach_file(
 ) -> str:
     """Upload a file as an attachment to a Confluence page.
 
+    Since the MCP server runs in Docker, this tool accepts base64-encoded file content
+    instead of file paths. The client must read the file and encode it as base64.
+
     Args:
         ctx: The FastMCP context.
-        file_path: Local path to the file that should be attached.
+        filename: Name of the file (used to determine extension and default name).
+        file_content_base64: Base64-encoded content of the file.
         page_id: ID of the page to attach the file to.
         space_key: Key of the space (used with title).
         title: Title of the target page (used with space_key).
-        attachment_name: Optional name for the attachment.
+        attachment_name: Optional display name for the attachment.
         content_type: Optional MIME type for the attachment.
         comment: Optional comment for the attachment.
 
@@ -877,13 +897,31 @@ async def attach_file(
 
     Raises:
         ValueError: If neither page_id nor space_key/title pair is provided,
-            or if Confluence client is unavailable.
-        FileNotFoundError: If the file does not exist.
+            or if base64 decoding fails, or if Confluence client is unavailable.
     """
+    import base64
+
     confluence_fetcher = await get_confluence_fetcher(ctx)
     try:
+        # Decode base64 content
+        try:
+            file_content = base64.b64decode(file_content_base64)
+        except Exception as decode_err:
+            error_msg = f"Failed to decode base64 content: {str(decode_err)}"
+            logger.error(error_msg)
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": "Invalid base64 content",
+                    "error": error_msg,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+
         attachment = confluence_fetcher.attach_file(
-            file_path=file_path,
+            file_content=file_content,
+            filename=filename,
             page_id=page_id,
             space_key=space_key,
             title=title,
@@ -896,13 +934,6 @@ async def attach_file(
             "success": True,
             "message": "File attached successfully",
             "attachment": attachment_data,
-        }
-    except FileNotFoundError as e:
-        logger.error(f"File not found: {str(e)}")
-        response = {
-            "success": False,
-            "message": f"File not found: {file_path}",
-            "error": str(e),
         }
     except ValueError as e:
         logger.error(f"Invalid parameters: {str(e)}")
