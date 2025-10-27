@@ -557,7 +557,10 @@ class PagesMixin(ConfluenceClient):
 
         path = Path(file_path).expanduser()
         if not path.is_file():
-            error_msg = f"Attachment file not found: {path}"
+            error_msg = (
+                f"Attachment file not found. "
+                f"Original input: '{file_path}', expanded path: '{path}'"
+            )
             logger.error(error_msg)
             raise FileNotFoundError(error_msg)
 

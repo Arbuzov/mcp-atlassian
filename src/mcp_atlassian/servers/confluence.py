@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastmcp import Context, FastMCP
 from pydantic import BeforeValidator, Field
+from requests.exceptions import HTTPError
 
 from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.servers.dependencies import get_confluence_fetcher
@@ -254,13 +255,24 @@ async def get_page_ancestors(
         ancestors = confluence_fetcher.get_page_ancestors(page_id)
         ancestor_list = [page.to_simplified_dict() for page in ancestors]
         result = {
+            "success": True,
             "page_id": page_id,
             "count": len(ancestor_list),
             "ancestors": ancestor_list,
         }
-    except OSError as e:
+    except MCPAtlassianAuthenticationError as e:
+        logger.error(
+            f"Authentication error getting ancestors for page {page_id}: {e}",
+            exc_info=False,
+        )
+        result = {
+            "success": False,
+            "error": "Authentication failed. Please check your credentials.",
+            "details": str(e),
+        }
+    except (HTTPError, OSError) as e:
         logger.error(f"Error getting ancestors for page ID {page_id}: {e}")
-        result = {"error": f"Failed to get ancestors: {e}"}
+        result = {"success": False, "error": f"Failed to get ancestors: {e}"}
 
     return json.dumps(result, indent=2, ensure_ascii=False)
 
@@ -322,15 +334,26 @@ async def get_space_pages(
         )
         page_list = [page.to_simplified_dict() for page in pages]
         result = {
+            "success": True,
             "space_key": space_key,
             "count": len(page_list),
             "start": start,
             "limit": limit,
             "pages": page_list,
         }
-    except OSError as e:
+    except MCPAtlassianAuthenticationError as e:
+        logger.error(
+            f"Authentication error getting pages from space {space_key}: {e}",
+            exc_info=False,
+        )
+        result = {
+            "success": False,
+            "error": "Authentication failed. Please check your credentials.",
+            "details": str(e),
+        }
+    except (HTTPError, OSError) as e:
         logger.error(f"Error getting pages from space {space_key}: {e}")
-        result = {"error": f"Failed to get pages from space: {e}"}
+        result = {"success": False, "error": f"Failed to get pages from space: {e}"}
 
     return json.dumps(result, indent=2, ensure_ascii=False)
 
