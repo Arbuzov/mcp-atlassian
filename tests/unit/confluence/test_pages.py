@@ -777,6 +777,56 @@ class TestPagesMixin:
                 file_path=file_path, file_content=file_content, page_id="123"
             )
 
+    def test_attach_file_with_binary_content(self, pages_mixin):
+        """Test attachment upload with binary file content (e.g., images, PDFs)."""
+        # Arrange - Create realistic binary content (simple PNG header + data)
+        # PNG file signature
+        png_signature = b"\x89PNG\r\n\x1a\n"
+        # IHDR chunk (13 bytes data: width=100, height=100, bit depth=8, color type=6)
+        ihdr_data = b"\x00\x00\x00\x64\x00\x00\x00\x64\x08\x06\x00\x00\x00"
+        # Chunk structure: length (4 bytes) + type (4 bytes) + data + CRC (4 bytes)
+        ihdr_chunk = b"\x00\x00\x00\x0d" + b"IHDR" + ihdr_data + b"\x00\x00\x00\x00"
+        # Minimal IEND chunk
+        iend_chunk = b"\x00\x00\x00\x00IEND\xae\x42\x60\x82"
+        binary_content = png_signature + ihdr_chunk + iend_chunk
+        filename = "test_image.png"
+
+        pages_mixin.confluence.attach_file.return_value = {
+            "results": [
+                {
+                    "id": "att789",
+                    "type": "attachment",
+                    "status": "current",
+                    "title": "test_image.png",
+                    "extensions": {
+                        "mediaType": "image/png",
+                        "fileSize": len(binary_content),
+                    },
+                }
+            ]
+        }
+
+        # Act
+        result = pages_mixin.attach_file(
+            file_content=binary_content,
+            filename=filename,
+            page_id="555666",
+            content_type="image/png",
+        )
+
+        # Assert
+        assert isinstance(result, ConfluenceAttachment)
+        assert result.id == "att789"
+        assert result.title == "test_image.png"
+
+        # Verify the binary data was handled correctly
+        call_args = pages_mixin.confluence.attach_file.call_args
+        assert call_args is not None
+        assert call_args.kwargs["content_type"] == "image/png"
+        assert call_args.kwargs["page_id"] == "555666"
+        # Ensure temporary file was created (filename should be a temp path)
+        assert isinstance(call_args.kwargs["filename"], str)
+
         # Test providing neither
         with pytest.raises(ValueError, match="either file_path or file_content"):
             pages_mixin.attach_file(page_id="123")

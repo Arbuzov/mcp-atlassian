@@ -815,15 +815,29 @@ async def attach_file(
         ),
     ],
     file_content_base64: Annotated[
-        str,
+        str | None,
         Field(
             description=(
                 "Base64-encoded content of the file to attach. "
                 "Since the MCP server runs in Docker and cannot access host files, "
-                "you must provide the file content encoded as base64 string."
-            )
+                "you must provide the file content encoded as base64 string. "
+                "Use this parameter instead of file_path."
+            ),
+            default=None,
         ),
-    ],
+    ] = None,
+    file_path: Annotated[
+        str | None,
+        Field(
+            description=(
+                "**DEPRECATED**: Path to the file on the local filesystem. "
+                "This parameter is deprecated because the MCP server runs in Docker "
+                "and cannot access host file paths. Use file_content_base64 instead."
+            ),
+            default=None,
+            deprecated=True,
+        ),
+    ] = None,
     page_id: Annotated[
         str | None,
         Field(
@@ -884,7 +898,8 @@ async def attach_file(
     Args:
         ctx: The FastMCP context.
         filename: Name of the file (used to determine extension and default name).
-        file_content_base64: Base64-encoded content of the file.
+        file_content_base64: Base64-encoded content of the file (preferred).
+        file_path: **DEPRECATED** - Local file path (won't work in Docker).
         page_id: ID of the page to attach the file to.
         space_key: Key of the space (used with title).
         title: Title of the target page (used with space_key).
@@ -902,6 +917,60 @@ async def attach_file(
     import base64
 
     confluence_fetcher = await get_confluence_fetcher(ctx)
+
+    # Handle deprecated file_path parameter
+    if file_path and not file_content_base64:
+        logger.warning(
+            "file_path parameter is deprecated and may not work in Docker. "
+            "Consider using file_content_base64 instead."
+        )
+        try:
+            attachment = confluence_fetcher.attach_file(
+                file_path=file_path,
+                page_id=page_id,
+                space_key=space_key,
+                title=title,
+                attachment_name=attachment_name,
+                content_type=content_type,
+                comment=comment,
+            )
+            attachment_data = attachment.to_simplified_dict()
+            response = {
+                "success": True,
+                "message": "File attached successfully (using deprecated file_path)",
+                "attachment": attachment_data,
+                "warning": (
+                    "file_path parameter is deprecated. "
+                    "Use file_content_base64 for Docker compatibility."
+                ),
+            }
+            return json.dumps(response, indent=2, ensure_ascii=False)
+        except FileNotFoundError as e:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": (
+                        "File not found. The MCP server runs in Docker and cannot "
+                        "access host file paths. Use file_content_base64 instead."
+                    ),
+                    "error": str(e),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+
+    # Require file_content_base64 for new usage
+    if not file_content_base64:
+        return json.dumps(
+            {
+                "success": False,
+                "message": "file_content_base64 is required",
+                "error": "Must provide base64-encoded file content",
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+
     try:
         # Decode base64 content
         try:
