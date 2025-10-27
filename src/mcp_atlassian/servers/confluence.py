@@ -818,10 +818,12 @@ async def attach_file(
         str | None,
         Field(
             description=(
-                "Base64-encoded content of the file to attach. "
+                "**PRIMARY METHOD**: Base64-encoded content of the file to attach. "
+                "This is the RECOMMENDED approach for uploading files. "
                 "Since the MCP server runs in Docker and cannot access host files, "
-                "you must provide the file content encoded as base64 string. "
-                "Use this parameter instead of file_path."
+                "you MUST use this parameter. Read the file from your system and "
+                "encode it to base64 before passing it here. "
+                "DO NOT use file_path - it will not work in Docker."
             ),
             default=None,
         ),
@@ -830,9 +832,10 @@ async def attach_file(
         str | None,
         Field(
             description=(
-                "**DEPRECATED**: Path to the file on the local filesystem. "
-                "This parameter is deprecated because the MCP server runs in Docker "
-                "and cannot access host file paths. Use file_content_base64 instead."
+                "**DEPRECATED - DO NOT USE**: Path to file on local filesystem. "
+                "This parameter is deprecated and WILL NOT WORK because the MCP "
+                "server runs in Docker and cannot access host file paths. "
+                "Use file_content_base64 instead."
             ),
             default=None,
             deprecated=True,
@@ -892,14 +895,31 @@ async def attach_file(
 ) -> str:
     """Upload a file as an attachment to a Confluence page.
 
-    Since the MCP server runs in Docker, this tool accepts base64-encoded file content
-    instead of file paths. The client must read the file and encode it as base64.
+    **RECOMMENDED APPROACH**: Use file_content_base64 parameter with
+    base64-encoded file content. This is the primary and preferred method
+    since the MCP server runs in Docker and cannot access host file paths.
+
+    The file_path parameter is deprecated and should only be used for
+    backward compatibility in non-Docker environments. Always try
+    file_content_base64 first.
+
+    Workflow:
+        1. Read the file from your local system
+        2. Encode the file content to base64 string
+        3. Pass the base64 string via file_content_base64 parameter
+        4. Specify the filename (with extension) to determine the file type
 
     Args:
         ctx: The FastMCP context.
-        filename: Name of the file (used to determine extension and default name).
-        file_content_base64: Base64-encoded content of the file (preferred).
-        file_path: **DEPRECATED** - Local file path (won't work in Docker).
+        filename: Name of the file (used to determine extension and
+            default name).
+        file_content_base64: **RECOMMENDED** - Base64-encoded content of
+            the file. This is the primary method for file uploads. The
+            client must read the file and encode it as base64 before
+            calling this tool.
+        file_path: **DEPRECATED** - Local file path. This parameter is
+            deprecated and will not work when the MCP server runs in
+            Docker. Use file_content_base64 instead.
         page_id: ID of the page to attach the file to.
         space_key: Key of the space (used with title).
         title: Title of the target page (used with space_key).
@@ -912,7 +932,23 @@ async def attach_file(
 
     Raises:
         ValueError: If neither page_id nor space_key/title pair is provided,
-            or if base64 decoding fails, or if Confluence client is unavailable.
+            or if base64 decoding fails, or if Confluence client is
+            unavailable.
+
+    Example:
+        To upload a file, first encode it to base64:
+        ```python
+        import base64
+        with open('document.pdf', 'rb') as f:
+            content_base64 = base64.b64encode(f.read()).decode('utf-8')
+
+        # Then call the tool with file_content_base64
+        result = attach_file(
+            filename='document.pdf',
+            file_content_base64=content_base64,
+            page_id='123456'
+        )
+        ```
     """
     import base64
 
