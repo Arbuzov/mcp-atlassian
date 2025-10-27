@@ -664,7 +664,7 @@ class TestPagesMixin:
 
         pages_mixin.confluence.attach_file.assert_called_once_with(
             filename=str(attachment),
-            name=None,
+            name="diagram.png",  # Now defaults to filename when attachment_name not provided
             content_type=None,
             page_id=None,
             title="Page Title",
@@ -712,6 +712,124 @@ class TestPagesMixin:
 
         assert isinstance(result, ConfluenceAttachment)
         assert result.id == "att-direct"
+
+    def test_attach_file_with_content(self, pages_mixin):
+        """Upload an attachment using file content (Docker mode)."""
+        # Arrange
+        file_content = b"This is test content for attachment"
+        filename = "test_document.txt"
+
+        pages_mixin.confluence.attach_file.return_value = {
+            "results": [
+                {
+                    "id": "att456",
+                    "type": "attachment",
+                    "status": "current",
+                    "title": "test_document.txt",
+                    "extensions": {
+                        "mediaType": "text/plain",
+                        "fileSize": len(file_content),
+                    },
+                }
+            ]
+        }
+
+        # Act
+        result = pages_mixin.attach_file(
+            file_content=file_content,
+            filename=filename,
+            page_id="987654",
+            attachment_name="Test Document",
+            comment="Uploaded via content",
+        )
+
+        # Assert
+        assert isinstance(result, ConfluenceAttachment)
+        assert result.id == "att456"
+        assert result.title == "test_document.txt"
+
+        # Verify the call was made with a temporary file
+        call_args = pages_mixin.confluence.attach_file.call_args
+        assert call_args is not None
+        assert call_args.kwargs["name"] == "Test Document"
+        assert call_args.kwargs["page_id"] == "987654"
+        assert call_args.kwargs["comment"] == "Uploaded via content"
+        # filename should be a path to a temporary file
+        assert isinstance(call_args.kwargs["filename"], str)
+        assert "test_document.txt" in call_args.kwargs["filename"]
+
+    def test_attach_file_requires_filename_with_content(self, pages_mixin):
+        """Ensure filename is required when using file_content."""
+        file_content = b"some data"
+
+        with pytest.raises(ValueError, match="filename is required"):
+            pages_mixin.attach_file(file_content=file_content, page_id="123")
+
+    def test_attach_file_requires_either_path_or_content(self, pages_mixin, tmp_path):
+        """Ensure either file_path or file_content is provided, not both."""
+        file_path = tmp_path / "test.txt"
+        file_path.write_text("data")
+        file_content = b"data"
+
+        # Test providing both
+        with pytest.raises(ValueError, match="either file_path or file_content"):
+            pages_mixin.attach_file(
+                file_path=file_path, file_content=file_content, page_id="123"
+            )
+
+    def test_attach_file_with_binary_content(self, pages_mixin):
+        """Test attachment upload with binary file content (e.g., images, PDFs)."""
+        # Arrange - Create realistic binary content (simple PNG header + data)
+        # PNG file signature
+        png_signature = b"\x89PNG\r\n\x1a\n"
+        # IHDR chunk (13 bytes data: width=100, height=100, bit depth=8, color type=6)
+        ihdr_data = b"\x00\x00\x00\x64\x00\x00\x00\x64\x08\x06\x00\x00\x00"
+        # Chunk structure: length (4 bytes) + type (4 bytes) + data + CRC (4 bytes)
+        ihdr_chunk = b"\x00\x00\x00\x0d" + b"IHDR" + ihdr_data + b"\x00\x00\x00\x00"
+        # Minimal IEND chunk
+        iend_chunk = b"\x00\x00\x00\x00IEND\xae\x42\x60\x82"
+        binary_content = png_signature + ihdr_chunk + iend_chunk
+        filename = "test_image.png"
+
+        pages_mixin.confluence.attach_file.return_value = {
+            "results": [
+                {
+                    "id": "att789",
+                    "type": "attachment",
+                    "status": "current",
+                    "title": "test_image.png",
+                    "extensions": {
+                        "mediaType": "image/png",
+                        "fileSize": len(binary_content),
+                    },
+                }
+            ]
+        }
+
+        # Act
+        result = pages_mixin.attach_file(
+            file_content=binary_content,
+            filename=filename,
+            page_id="555666",
+            content_type="image/png",
+        )
+
+        # Assert
+        assert isinstance(result, ConfluenceAttachment)
+        assert result.id == "att789"
+        assert result.title == "test_image.png"
+
+        # Verify the binary data was handled correctly
+        call_args = pages_mixin.confluence.attach_file.call_args
+        assert call_args is not None
+        assert call_args.kwargs["content_type"] == "image/png"
+        assert call_args.kwargs["page_id"] == "555666"
+        # Ensure temporary file was created (filename should be a temp path)
+        assert isinstance(call_args.kwargs["filename"], str)
+
+        # Test providing neither
+        with pytest.raises(ValueError, match="either file_path or file_content"):
+            pages_mixin.attach_file(page_id="123")
 
     def test_move_page_with_parent_and_space(self, pages_mixin):
         """Test moving a page to a new parent and space."""

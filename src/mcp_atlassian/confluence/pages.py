@@ -1,6 +1,10 @@
 """Module for Confluence page operations."""
 
 import logging
+import os
+import tempfile
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +17,47 @@ from .client import ConfluenceClient
 from .v2_adapter import ConfluenceV2Adapter
 
 logger = logging.getLogger("mcp-atlassian")
+
+
+@contextmanager
+def temporary_file_from_bytes(
+    content: bytes, suffix: str = ""
+) -> Generator[str, None, None]:
+    """Context manager for creating and cleaning up temporary files.
+
+    Args:
+        content: Bytes content to write to the temporary file.
+        suffix: Optional suffix for the temporary file.
+
+    Yields:
+        str: Path to the temporary file.
+
+    Raises:
+        OSError: If file creation or cleanup fails.
+    """
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        temp_file.write(content)
+        temp_file.flush()
+        temp_file.close()
+        yield temp_file.name
+    except OSError as exc:
+        # Clean up on creation error
+        if os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
+        logger.error("Error creating temporary file: %s", exc)
+        raise
+    finally:
+        # Always clean up the temporary file
+        if os.path.exists(temp_file.name):
+            try:
+                os.unlink(temp_file.name)
+            except OSError as cleanup_exc:
+                logger.warning(
+                    "Failed to clean up temporary file '%s': %s",
+                    temp_file.name,
+                    cleanup_exc,
+                )
 
 
 class PagesMixin(ConfluenceClient):
@@ -519,9 +564,169 @@ class PagesMixin(ConfluenceClient):
             logger.debug("Full exception details:", exc_info=True)
             return []
 
+    def _validate_attachment_params(
+        self,
+        file_path: str | Path | None,
+        file_content: bytes | None,
+        filename: str | None,
+        page_id: str | None,
+        space_key: str | None,
+        title: str | None,
+    ) -> None:
+        """Validate attachment upload parameters.
+
+        Args:
+            file_path: File path (if using path mode).
+            file_content: File content bytes (if using content mode).
+            filename: Filename (required for content mode).
+            page_id: Page ID target.
+            space_key: Space key (used with title).
+            title: Page title (used with space_key).
+
+        Raises:
+            ValueError: If parameters are invalid or conflicting.
+        """
+        # Validate file input modes
+        if file_path and file_content:
+            error_msg = "Provide either file_path or file_content, not both"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        if not file_path and not file_content:
+            error_msg = "Must provide either file_path or file_content"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        if file_content and not filename:
+            error_msg = "filename is required when using file_content"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        # Validate target page parameters
+        if not page_id and not (space_key and title):
+            error_msg = (
+                "attach_file requires either page_id or both space_key and title"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        # Warn about conflicting parameters
+        if page_id and (space_key or title):
+            logger.warning(
+                "Both page_id and space_key/title provided. "
+                "Using page_id and ignoring space_key/title. "
+                f"page_id={page_id}, space_key={space_key}, title={title}"
+            )
+
+    def _prepare_file_for_upload(
+        self,
+        file_path: str | Path | None,
+        file_content: bytes | None,
+        filename: str | None,
+        attachment_name: str | None,
+    ) -> tuple[str, str]:
+        """Prepare file for upload by validating path or creating temporary file.
+
+        Args:
+            file_path: File path (if using path mode).
+            file_content: File content bytes (if using content mode).
+            filename: Filename (required for content mode).
+            attachment_name: Optional display name for attachment.
+
+        Returns:
+            Tuple of (file_to_upload_path, actual_filename).
+
+        Raises:
+            FileNotFoundError: If file_path doesn't exist.
+        """
+        if file_path:
+            path = Path(file_path).expanduser()
+            if not path.is_file():
+                error_msg = (
+                    f"Attachment file not found. "
+                    f"Original input: '{file_path}', expanded path: '{path}'"
+                )
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
+            return str(path), attachment_name or path.name
+        else:
+            # Content mode - will use context manager in attach_file
+            return "", attachment_name or filename  # type: ignore[return-value]
+
+    def _upload_attachment(
+        self,
+        file_to_upload: str,
+        actual_filename: str,
+        page_id: str | None,
+        space_key: str | None,
+        title: str | None,
+        content_type: str | None,
+        comment: str | None,
+    ) -> dict[str, Any]:
+        """Upload attachment to Confluence API.
+
+        Args:
+            file_to_upload: Path to file to upload.
+            actual_filename: Display name for attachment.
+            page_id: Page ID target.
+            space_key: Space key (used with title).
+            title: Page title (used with space_key).
+            content_type: MIME type.
+            comment: Attachment comment.
+
+        Returns:
+            API response dictionary.
+
+        Raises:
+            MCPAtlassianAuthenticationError: If authentication fails.
+            HTTPError: For other HTTP errors.
+        """
+        if page_id:
+            logger.debug(
+                "Uploading attachment '%s' to page ID %s", actual_filename, page_id
+            )
+        else:
+            logger.debug(
+                "Uploading attachment '%s' to page '%s' in space '%s'",
+                actual_filename,
+                title,
+                space_key,
+            )
+
+        try:
+            response = self.confluence.attach_file(
+                filename=file_to_upload,
+                name=actual_filename,
+                content_type=content_type,
+                page_id=page_id,
+                title=title,
+                space=space_key,
+                comment=comment,
+            )
+            return response
+        except HTTPError as http_err:
+            if http_err.response is not None and http_err.response.status_code in [
+                401,
+                403,
+            ]:
+                error_msg = (
+                    "Authentication failed when uploading attachment to Confluence "
+                    f"({http_err.response.status_code})."
+                )
+                logger.error(error_msg)
+                raise MCPAtlassianAuthenticationError(error_msg) from http_err
+            logger.error(
+                "HTTP error while uploading attachment '%s': %s",
+                actual_filename,
+                http_err,
+            )
+            raise
+
     def attach_file(
         self,
-        file_path: str | Path,
+        file_path: str | Path | None = None,
+        file_content: bytes | None = None,
+        filename: str | None = None,
         *,
         page_id: str | None = None,
         space_key: str | None = None,
@@ -532,8 +737,14 @@ class PagesMixin(ConfluenceClient):
     ) -> ConfluenceAttachment:
         """Upload a file as an attachment to a Confluence page.
 
+        Supports two modes:
+        1. File path mode (legacy): Provide ``file_path``
+        2. Content mode (for Docker/remote): Provide ``file_content`` and ``filename``
+
         Args:
-            file_path: Local path to the file that should be attached.
+            file_path: Local path to the file (for local/non-Docker use).
+            file_content: Raw bytes content of the file (for Docker/remote use).
+            filename: Name for the file when using ``file_content`` mode.
             page_id: ID of the page to attach the file to. When provided, overrides
                 ``space_key`` and ``title``.
             space_key: Key of the space that contains the page (used with ``title``).
@@ -549,77 +760,44 @@ class PagesMixin(ConfluenceClient):
         Raises:
             FileNotFoundError: If ``file_path`` does not exist or is not a file.
             ValueError: If neither ``page_id`` nor a ``space_key``/``title`` pair is
+                provided, if both or neither of ``file_path``/``file_content`` are
                 provided, or if the API response cannot be parsed.
             MCPAtlassianAuthenticationError: If authentication fails.
             HTTPError: If the Confluence REST API returns an HTTP error other than
                 authentication failures.
         """
+        # Validate all parameters
+        self._validate_attachment_params(
+            file_path, file_content, filename, page_id, space_key, title
+        )
 
-        path = Path(file_path).expanduser()
-        if not path.is_file():
-            error_msg = (
-                f"Attachment file not found. "
-                f"Original input: '{file_path}', expanded path: '{path}'"
-            )
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
+        # Prepare file and get filename
+        file_to_upload, actual_filename = self._prepare_file_for_upload(
+            file_path, file_content, filename, attachment_name
+        )
 
-        # Validate and warn about conflicting parameters
-        if page_id and (space_key or title):
-            logger.warning(
-                "Both page_id and space_key/title provided. "
-                "Using page_id and ignoring space_key/title. "
-                f"page_id={page_id}, space_key={space_key}, title={title}"
-            )
-
-        if page_id:
-            logger.debug("Uploading attachment '%s' to page ID %s", path.name, page_id)
-        elif space_key and title:
-            logger.debug(
-                "Uploading attachment '%s' to page '%s' in space '%s'",
-                path.name,
-                title,
-                space_key,
-            )
-        else:
-            error_msg = (
-                "attach_file requires either page_id or both space_key and title"
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        try:
-            response = self.confluence.attach_file(
-                filename=str(path),
-                name=attachment_name,
-                content_type=content_type,
-                page_id=page_id,
-                title=title,
-                space=space_key,
-                comment=comment,
-            )
-        except HTTPError as http_err:
-            if http_err.response is not None and http_err.response.status_code in [
-                401,
-                403,
-            ]:
-                error_msg = (
-                    "Authentication failed when uploading attachment to Confluence "
-                    f"({http_err.response.status_code})."
+        # Upload with context manager for content mode
+        if file_content:
+            with temporary_file_from_bytes(file_content, suffix=f"_{filename}") as tmp:
+                response = self._upload_attachment(
+                    tmp,
+                    actual_filename,
+                    page_id,
+                    space_key,
+                    title,
+                    content_type,
+                    comment,
                 )
-                logger.error(error_msg)
-                raise MCPAtlassianAuthenticationError(error_msg) from http_err
-            logger.error(
-                "HTTP error while uploading attachment '%s': %s",
-                path.name,
-                http_err,
+        else:
+            response = self._upload_attachment(
+                file_to_upload,
+                actual_filename,
+                page_id,
+                space_key,
+                title,
+                content_type,
+                comment,
             )
-            raise
-        except Exception as exc:  # noqa: BLE001 - bubble up after logging
-            logger.error(
-                "Unexpected error uploading attachment '%s': %s", path.name, exc
-            )
-            raise
 
         attachment_payload = self._extract_attachment_payload(response)
         return ConfluenceAttachment.from_api_response(attachment_payload)
