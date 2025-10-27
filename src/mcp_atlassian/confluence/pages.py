@@ -564,6 +564,14 @@ class PagesMixin(ConfluenceClient):
             logger.error(error_msg)
             raise FileNotFoundError(error_msg)
 
+        # Validate and warn about conflicting parameters
+        if page_id and (space_key or title):
+            logger.warning(
+                "Both page_id and space_key/title provided. "
+                "Using page_id and ignoring space_key/title. "
+                f"page_id={page_id}, space_key={space_key}, title={title}"
+            )
+
         if page_id:
             logger.debug("Uploading attachment '%s' to page ID %s", path.name, page_id)
         elif space_key and title:
@@ -613,12 +621,30 @@ class PagesMixin(ConfluenceClient):
             )
             raise
 
+        attachment_payload = self._extract_attachment_payload(response)
+        return ConfluenceAttachment.from_api_response(attachment_payload)
+
+    def _extract_attachment_payload(self, response: Any) -> dict[str, Any]:
+        """Extract attachment payload from Confluence API response.
+
+        Args:
+            response: The raw API response from Confluence.
+
+        Returns:
+            Dictionary containing the attachment data.
+
+        Raises:
+            ValueError: If the response cannot be parsed as a valid attachment.
+        """
         attachment_payload: dict[str, Any] | None = None
+
         if isinstance(response, dict):
+            # Check for paginated results format
             if isinstance(response.get("results"), list) and response["results"]:
                 first_result = response["results"][0]
                 if isinstance(first_result, dict):
                     attachment_payload = first_result
+            # Check for single attachment format
             elif response.get("type") == "attachment":
                 attachment_payload = response
 
@@ -630,7 +656,7 @@ class PagesMixin(ConfluenceClient):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        return ConfluenceAttachment.from_api_response(attachment_payload)
+        return attachment_payload
 
     def move_page(
         self,

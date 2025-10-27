@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from pydantic import BeforeValidator, Field
@@ -239,7 +239,7 @@ async def get_page_ancestors(
             )
         ),
     ],
-) -> str:
+) -> dict[str, Any]:
     """Get ancestors (parent pages) of a specific Confluence page.
 
     Args:
@@ -247,14 +247,14 @@ async def get_page_ancestors(
         page_id: The ID of the page to get ancestors for.
 
     Returns:
-        JSON string representing a list of ancestor page objects in
-        hierarchical order (immediate parent first, root ancestor last).
+        Dictionary containing ancestor page objects in hierarchical order
+        (immediate parent first, root ancestor last).
     """
     confluence_fetcher = await get_confluence_fetcher(ctx)
     try:
         ancestors = confluence_fetcher.get_page_ancestors(page_id)
         ancestor_list = [page.to_simplified_dict() for page in ancestors]
-        result = {
+        return {
             "success": True,
             "page_id": page_id,
             "count": len(ancestor_list),
@@ -265,16 +265,14 @@ async def get_page_ancestors(
             f"Authentication error getting ancestors for page {page_id}: {e}",
             exc_info=False,
         )
-        result = {
+        return {
             "success": False,
             "error": "Authentication failed. Please check your credentials.",
             "details": str(e),
         }
     except (HTTPError, OSError) as e:
         logger.error(f"Error getting ancestors for page ID {page_id}: {e}")
-        result = {"success": False, "error": f"Failed to get ancestors: {e}"}
-
-    return json.dumps(result, indent=2, ensure_ascii=False)
+        return {"success": False, "error": f"Failed to get ancestors: {e}"}
 
 
 @confluence_mcp.tool(tags={"confluence", "read"})
@@ -311,7 +309,7 @@ async def get_space_pages(
             default=True,
         ),
     ] = True,
-) -> str:
+) -> dict[str, Any]:
     """Get all pages from a specific Confluence space.
 
     Args:
@@ -322,7 +320,7 @@ async def get_space_pages(
         convert_to_markdown: Convert content to markdown or keep raw HTML.
 
     Returns:
-        JSON string representing a list of page objects from the space.
+        Dictionary containing list of page objects from the space.
     """
     confluence_fetcher = await get_confluence_fetcher(ctx)
     try:
@@ -333,7 +331,7 @@ async def get_space_pages(
             convert_to_markdown=convert_to_markdown,
         )
         page_list = [page.to_simplified_dict() for page in pages]
-        result = {
+        return {
             "success": True,
             "space_key": space_key,
             "count": len(page_list),
@@ -346,16 +344,14 @@ async def get_space_pages(
             f"Authentication error getting pages from space {space_key}: {e}",
             exc_info=False,
         )
-        result = {
+        return {
             "success": False,
             "error": "Authentication failed. Please check your credentials.",
             "details": str(e),
         }
     except (HTTPError, OSError) as e:
         logger.error(f"Error getting pages from space {space_key}: {e}")
-        result = {"success": False, "error": f"Failed to get pages from space: {e}"}
-
-    return json.dumps(result, indent=2, ensure_ascii=False)
+        return {"success": False, "error": f"Failed to get pages from space: {e}"}
 
 
 @confluence_mcp.tool(tags={"confluence", "read"})
