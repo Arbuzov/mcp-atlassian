@@ -130,6 +130,25 @@ class SprintsMixin(JiraClient):
             logger.error(f"Error updating sprint: {str(e)}")
             return None
 
+    def add_issues_to_sprint(self, sprint_id: str, issue_keys: list[str]) -> bool:
+        """Add issues to a sprint.
+
+        Args:
+            sprint_id: The sprint ID to add issues to.
+            issue_keys: List of issue keys to add (e.g., ["PROJ-1", "PROJ-2"]).
+
+        Returns:
+            True if successful.
+
+        Raises:
+            requests.HTTPError: If the API call fails.
+        """
+        self.jira.post(
+            f"rest/agile/1.0/sprint/{sprint_id}/issue",
+            data={"issues": issue_keys},
+        )
+        return True
+
     def create_sprint(
         self,
         board_id: str,
@@ -162,6 +181,8 @@ class SprintsMixin(JiraClient):
             raise ValueError("Start date is required.")
 
         # validate start date is not in the past
+        if parsed_start_date.tzinfo is None:
+            parsed_start_date = parsed_start_date.replace(tzinfo=datetime.timezone.utc)
         if parsed_start_date < datetime.datetime.now(datetime.timezone.utc):
             raise ValueError("Start date cannot be in the past.")
 

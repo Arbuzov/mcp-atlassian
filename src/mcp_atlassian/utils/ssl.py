@@ -19,7 +19,6 @@ class SSLIgnoreAdapter(HTTPAdapter):
     This implementation ensures that both verify_mode is set to CERT_NONE and check_hostname
     is disabled, which is required for properly ignoring SSL certificates.
 
-    This adapter also enables legacy SSL renegotiation which may be required for some older servers.
     Note that this reduces security and should only be used when absolutely necessary.
     """
 
@@ -41,10 +40,6 @@ class SSLIgnoreAdapter(HTTPAdapter):
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-
-        # Enable legacy SSL renegotiation
-        context.options |= 0x4  # SSL_OP_LEGACY_SERVER_CONNECT
-        context.options |= 0x40000  # SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
 
         self.poolmanager = PoolManager(
             num_pools=connections,
@@ -70,20 +65,49 @@ class SSLIgnoreAdapter(HTTPAdapter):
 
 
 def configure_ssl_verification(
-    service_name: str, url: str, session: Session, ssl_verify: bool
+    service_name: str,
+    url: str,
+    session: Session,
+    ssl_verify: bool,
+    client_cert: str | None = None,
+    client_key: str | None = None,
+    client_key_password: str | None = None,
 ) -> None:
-    """Configure SSL verification for a specific service.
+    """Configure SSL verification and client certificates for a specific service.
 
     If SSL verification is disabled, this function will configure the session
     to use a custom SSL adapter that bypasses certificate validation for the
     service's domain.
+
+    If client certificate paths are provided, they will be configured for
+    mutual TLS authentication.
 
     Args:
         service_name: Name of the service for logging (e.g., "Confluence", "Jira")
         url: The base URL of the service
         session: The requests session to configure
         ssl_verify: Whether SSL verification should be enabled
+        client_cert: Path to client certificate file (.pem)
+        client_key: Path to client private key file (.pem)
+        client_key_password: Password for encrypted private key (optional)
     """
+    # Configure client certificate if provided (must be actual string paths)
+    if isinstance(client_cert, str) and isinstance(client_key, str):
+        # Encrypted private keys are not supported by the requests library
+        if isinstance(client_key_password, str) and client_key_password:
+            raise ValueError(
+                f"{service_name} client certificate authentication with encrypted "
+                "private keys is not supported. Please decrypt your private key first "
+                "(e.g., using 'openssl rsa -in encrypted.key -out decrypted.key')."
+            )
+
+        # Set the client certificate on the session
+        session.cert = (client_cert, client_key)
+        logger.info(
+            f"{service_name} client certificate authentication configured "
+            f"with cert: {client_cert}"
+        )
+
     if not ssl_verify:
         logger.warning(
             f"{service_name} SSL verification disabled. This is insecure and should only be used in testing environments."

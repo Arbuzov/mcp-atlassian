@@ -8,27 +8,36 @@ This module provides various Jira API client implementations.
 # Re-export the Jira class for backward compatibility
 from atlassian.jira import Jira
 
+from .attachments import AttachmentsMixin
+from .boards import BoardsMixin
 from .client import JiraClient
 from .comments import CommentsMixin
 from .config import JiraConfig
+from .development import DevelopmentMixin
 from .epics import EpicsMixin
+from .field_options import FieldOptionsMixin
 from .fields import FieldsMixin
+from .forms_api import FormsApiMixin  # Forms REST API
 from .formatting import FormattingMixin
 from .issues import IssuesMixin
 from .links import LinksMixin
+from .metrics import MetricsMixin
 from .projects import ProjectsMixin
+from .queues import QueuesMixin
+from .sla import SLAMixin
 from .search import SearchMixin
 from .sprints import SprintsMixin
 from .transitions import TransitionsMixin
 from .users import UsersMixin
+from .watchers import WatchersMixin
 from .worklog import WorklogMixin
-from .boards import BoardsMixin
-from .attachments import AttachmentsMixin
 
 
 class JiraFetcher(
     ProjectsMixin,
     FieldsMixin,
+    FieldOptionsMixin,
+    FormsApiMixin,  # Use new Forms REST API instead of FormsMixin
     FormattingMixin,
     TransitionsMixin,
     WorklogMixin,
@@ -37,10 +46,15 @@ class JiraFetcher(
     SearchMixin,
     IssuesMixin,
     UsersMixin,
+    WatchersMixin,
     BoardsMixin,
     SprintsMixin,
+    QueuesMixin,
     AttachmentsMixin,
     LinksMixin,
+    MetricsMixin,
+    SLAMixin,
+    DevelopmentMixin,
 ):
     """
     The main Jira client class providing access to all Jira operations.
@@ -56,10 +70,14 @@ class JiraFetcher(
     - SearchMixin: Search operations
     - IssuesMixin: Issue operations
     - UsersMixin: User operations
+    - WatchersMixin: Watcher operations
     - BoardsMixin: Board operations
     - SprintsMixin: Sprint operations
     - AttachmentsMixin: Attachment download operations
     - LinksMixin: Issue link operations
+    - MetricsMixin: Issue metrics and date operations
+    - QueuesMixin: Service Desk queue read operations (Server/DC)
+    - SLAMixin: SLA calculations
 
     The class structure is designed to maintain backward compatibility while
     improving code organization and maintainability.
@@ -68,4 +86,11 @@ class JiraFetcher(
     pass
 
 
-__all__ = ["JiraFetcher", "JiraConfig", "JiraClient", "Jira"]
+__all__ = [
+    "JiraFetcher",
+    "JiraConfig",
+    "JiraClient",
+    "Jira",
+    "MetricsMixin",
+    "SLAMixin",
+]

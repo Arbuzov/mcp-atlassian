@@ -6,9 +6,10 @@ from typing import TYPE_CHECKING, TypeVar
 
 import requests
 from requests.exceptions import HTTPError
+from unidecode import unidecode
 
-from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.models.jira.common import JiraUser
+from mcp_atlassian.utils.decorators import handle_auth_errors
 
 from .client import JiraClient
 
@@ -18,6 +19,24 @@ if TYPE_CHECKING:
 JiraUserType = TypeVar("JiraUserType", bound="JiraUser")
 
 logger = logging.getLogger("mcp-jira")
+
+
+def normalize_text(text: str | None) -> str:
+    """Normalize text for case-insensitive Unicode comparison.
+
+    Uses unidecode for ASCII transliteration to handle characters like
+    Polish "ł" matching ASCII "l", then casefold for case-insensitivity.
+
+    Args:
+        text: The text to normalize.
+
+    Returns:
+        Normalized ASCII text suitable for comparison.
+    """
+    if not text:
+        return ""
+    # Transliterate to ASCII (ł→l, ó→o, etc.) then casefold for case-insensitivity
+    return unidecode(text).casefold()
 
 
 class UsersMixin(JiraClient):
@@ -139,11 +158,12 @@ class UsersMixin(JiraClient):
                 logger.error(msg)
                 return None
 
+            search_norm = normalize_text(username)
             for user in response:
                 if (
-                    user.get("displayName", "").lower() == username.lower()
-                    or user.get("name", "").lower() == username.lower()
-                    or user.get("emailAddress", "").lower() == username.lower()
+                    normalize_text(user.get("displayName", "")) == search_norm
+                    or normalize_text(user.get("name", "")) == search_norm
+                    or normalize_text(user.get("emailAddress", "")) == search_norm
                 ):
                     if self.config.is_cloud:
                         if "accountId" in user:
@@ -162,6 +182,42 @@ class UsersMixin(JiraClient):
             return None
         except Exception as e:
             logger.info(f"Error looking up user directly: {str(e)}")
+            return None
+
+    def _resolve_server_dc_user_params(self, email: str) -> dict[str, str] | None:
+        """Resolve email to Server/DC user API params via search.
+
+        Unlike _lookup_user_directly which returns a bare string,
+        this returns the correct API parameter dict, avoiding the
+        need to guess whether the value is a username or key.
+
+        Args:
+            email: Email address to resolve.
+
+        Returns:
+            Dict with 'username' or 'key' param, or None if not found.
+        """
+        try:
+            response = self.jira.user_find_by_user_string(
+                username=email, start=0, limit=1
+            )
+            if not isinstance(response, list):
+                return None
+
+            search_norm = normalize_text(email)
+            for user in response:
+                if (
+                    normalize_text(user.get("displayName", "")) == search_norm
+                    or normalize_text(user.get("name", "")) == search_norm
+                    or normalize_text(user.get("emailAddress", "")) == search_norm
+                ):
+                    if user.get("name"):
+                        return {"username": user["name"]}
+                    elif user.get("key"):
+                        return {"key": user["key"]}
+            return None
+        except Exception as e:
+            logger.info(f"Error resolving server user by email: {e}")
             return None
 
     def _lookup_user_by_permissions(self, username: str) -> str | None:
@@ -239,14 +295,25 @@ class UsersMixin(JiraClient):
         # Server/DC: username, key, or email
         elif not self.config.is_cloud:
             if "@" in identifier:
-                api_kwargs["username"] = identifier
-                logger.debug(
-                    f"Determined param: username='{identifier}' (Server/DC email - might not work)"
-                )
-            elif "-" in identifier and any(c.isdigit() for c in identifier):
-                api_kwargs["key"] = identifier
-                logger.debug(f"Determined param: key='{identifier}' (Server/DC)")
+                # /rest/api/2/user?username=email won't match by email on Server/DC.
+                # Use /rest/api/2/user/search first to resolve email → actual username/key.
+                resolved_params = self._resolve_server_dc_user_params(identifier)
+                if resolved_params:
+                    api_kwargs.update(resolved_params)
+                    param_name = next(iter(resolved_params))
+                    logger.debug(
+                        f"Resolved email '{identifier}' to {param_name}="
+                        f"'{resolved_params[param_name]}' (Server/DC)"
+                    )
+                else:
+                    # Fallback: try email as username directly (works if login name IS the email)
+                    api_kwargs["username"] = identifier
+                    logger.debug(
+                        f"Could not resolve email '{identifier}' via search, "
+                        f"trying as username directly (Server/DC)"
+                    )
             else:
+                # Non-email: use username= (safe default for Server/DC 7.x+)
                 api_kwargs["username"] = identifier
                 logger.debug(f"Determined param: username='{identifier}' (Server/DC)")
         # Cloud: identifier is email
@@ -299,19 +366,23 @@ class UsersMixin(JiraClient):
 
         return api_kwargs
 
+    @handle_auth_errors("Jira API")
     def get_user_profile_by_identifier(self, identifier: str) -> "JiraUser":
         """
         Retrieve Jira user profile information by identifier.
 
         Args:
-            identifier (str): User identifier (accountId, username, key, or email).
+            identifier: User identifier (accountId, username,
+                key, or email).
 
         Returns:
-            JiraUser: JiraUser model with profile information.
+            JiraUser model with profile information.
 
         Raises:
-            ValueError: If the user cannot be found or identifier cannot be resolved.
-            MCPAtlassianAuthenticationError: If authentication fails.
+            ValueError: If the user cannot be found or
+                identifier cannot be resolved.
+            MCPAtlassianAuthenticationError: If authentication
+                fails.
             Exception: For other API errors.
         """
         api_kwargs = self._determine_user_api_params(identifier)
@@ -321,37 +392,17 @@ class UsersMixin(JiraClient):
             user_data = self.jira.user(**api_kwargs)
             if not isinstance(user_data, dict):
                 logger.error(
-                    f"User lookup for '{identifier}' returned unexpected type: {type(user_data)}. Data: {user_data}"
+                    f"User lookup for '{identifier}'"
+                    " returned unexpected type:"
+                    f" {type(user_data)}."
+                    f" Data: {user_data}"
                 )
                 raise ValueError(f"User '{identifier}' not found or lookup failed.")
             return JiraUser.from_api_response(user_data)
         except HTTPError as http_err:
-            if http_err.response is not None:
-                response_text = http_err.response.text[:200]
-                status_code = http_err.response.status_code
-                if status_code == 404:
-                    raise ValueError(f"User '{identifier}' not found.") from http_err
-                elif status_code in [401, 403]:
-                    logger.error(
-                        f"Authentication/Permission error for '{identifier}': {status_code}"
-                    )
-                    raise MCPAtlassianAuthenticationError(
-                        f"Permission denied accessing user '{identifier}'."
-                    ) from http_err
-                else:
-                    logger.error(
-                        f"HTTP error {status_code} for '{identifier}': {http_err}. Response: {response_text}"
-                    )
-                    raise Exception(
-                        f"API error getting user profile for '{identifier}': {http_err}"
-                    ) from http_err
-            else:
-                logger.error(
-                    f"Network or unknown HTTP error (no response object) for '{identifier}': {http_err}"
-                )
-                raise Exception(
-                    f"Network error getting user profile for '{identifier}': {http_err}"
-                ) from http_err
+            if http_err.response is not None and http_err.response.status_code == 404:
+                raise ValueError(f"User '{identifier}' not found.") from http_err
+            raise  # decorator handles 401/403
         except Exception as e:
             logger.exception(
                 f"Unexpected error getting/processing user profile for '{identifier}':"

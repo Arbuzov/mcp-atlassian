@@ -1,15 +1,18 @@
 """Module for Jira search operations."""
 
 import logging
+import re
+from typing import Any
 
 import requests
 from requests.exceptions import HTTPError
 
-from ..exceptions import MCPAtlassianAuthenticationError
 from ..models.jira import JiraSearchResult
+from ..utils.decorators import handle_auth_errors
 from .client import JiraClient
 from .constants import DEFAULT_READ_JIRA_FIELDS
 from .protocols import IssueOperationsProto
+from .utils import quote_jql_identifier_if_needed, sanitize_jql_reserved_words
 
 logger = logging.getLogger("mcp-jira")
 
@@ -17,6 +20,7 @@ logger = logging.getLogger("mcp-jira")
 class SearchMixin(JiraClient, IssueOperationsProto):
     """Mixin for Jira search operations."""
 
+    @handle_auth_errors("Jira API")
     def search_issues(
         self,
         jql: str,
@@ -25,6 +29,7 @@ class SearchMixin(JiraClient, IssueOperationsProto):
         limit: int = 50,
         expand: str | None = None,
         projects_filter: str | None = None,
+        page_token: str | None = None,
     ) -> JiraSearchResult:
         """
         Search for issues using JQL (Jira Query Language).
@@ -38,6 +43,8 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             limit: Maximum issues to return
             expand: Optional items to expand (comma-separated)
             projects_filter: Optional comma-separated list of project keys to filter by, overrides config
+            page_token: Optional pagination token from a previous search result.
+                  Cloud only — Server/DC uses start for pagination.
 
         Returns:
             JiraSearchResult object containing issues and metadata (total, start_at, max_results)
@@ -47,6 +54,9 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             Exception: If there is an error searching for issues
         """
         try:
+            # Sanitize JQL reserved words in project key values
+            jql = sanitize_jql_reserved_words(jql)
+
             # Use projects_filter parameter if provided, otherwise fall back to config
             filter_to_use = projects_filter or self.config.projects_filter
 
@@ -56,10 +66,19 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                 projects = [p.strip() for p in filter_to_use.split(",")]
 
                 # Build the project filter query part
+                # Sanitize project names to prevent JQL injection
+                # Escape backslashes before double-quotes to prevent bypass
+                projects = [
+                    p.replace("\\", "\\\\").replace('"', '\\"') for p in projects
+                ]
+
                 if len(projects) == 1:
-                    project_query = f'project = "{projects[0]}"'
+                    quoted = quote_jql_identifier_if_needed(projects[0])
+                    project_query = f"project = {quoted}"
                 else:
-                    quoted_projects = [f'"{p}"' for p in projects]
+                    quoted_projects = [
+                        quote_jql_identifier_if_needed(p) for p in projects
+                    ]
                     projects_list = ", ".join(quoted_projects)
                     project_query = f"project IN ({projects_list})"
 
@@ -70,9 +89,22 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                 elif jql.strip().upper().startswith("ORDER BY"):
                     # JQL starts with ORDER BY - prepend project filter
                     jql = f"{project_query} {jql}"
-                elif "project = " not in jql and "project IN" not in jql:
+                elif (
+                    "project = " not in jql.lower() and "project in" not in jql.lower()
+                ):
                     # Only add if not already filtering by project
-                    jql = f"({jql}) AND {project_query}"
+                    # Extract ORDER BY clause if present to avoid invalid JQL
+                    order_match = re.search(
+                        r"\s+(ORDER\s+BY\s+.*)$", jql, re.IGNORECASE
+                    )
+                    if order_match:
+                        order_clause = order_match.group(1)
+                        jql_without_order = jql[: order_match.start()]
+                        jql = (
+                            f"({jql_without_order}) AND {project_query} {order_clause}"
+                        )
+                    else:
+                        jql = f"({jql}) AND {project_query}"
 
                 logger.info(f"Applied projects filter to query: {jql}")
 
@@ -86,55 +118,68 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                 fields_param = fields
 
             if self.config.is_cloud:
-                actual_total = -1
-                try:
-                    # Call 1: Get metadata (including total) using standard search API
-                    metadata_params = {"jql": jql, "maxResults": 0}
-                    metadata_response = self.jira.get(
-                        self.jira.resource_url("search"), params=metadata_params
-                    )
+                # Cloud: Use v3 API endpoint POST /rest/api/3/search/jql
+                # The old v2 /rest/api/*/search endpoint is deprecated
+                # See: https://developer.atlassian.com/changelog/#CHANGE-2046
 
-                    if (
-                        isinstance(metadata_response, dict)
-                        and "total" in metadata_response
-                    ):
-                        try:
-                            actual_total = int(metadata_response["total"])
-                        except (ValueError, TypeError):
-                            logger.warning(
-                                f"Could not parse 'total' from metadata response for JQL: {jql}. Received: {metadata_response.get('total')}"
-                            )
-                    else:
-                        logger.warning(
-                            f"Could not retrieve total count from metadata response for JQL: {jql}. Response type: {type(metadata_response)}"
-                        )
-                except Exception as meta_err:
-                    logger.error(
-                        f"Error fetching metadata for JQL '{jql}': {str(meta_err)}"
-                    )
-
-                # Call 2: Get the actual issues using the enhanced method
-                issues_response_list = self.jira.enhanced_jql_get_list_of_tickets(
-                    jql, fields=fields_param, limit=limit, expand=expand
-                )
-
-                if not isinstance(issues_response_list, list):
-                    msg = f"Unexpected return value type from `jira.enhanced_jql_get_list_of_tickets`: {type(issues_response_list)}"
-                    logger.error(msg)
-                    raise TypeError(msg)
-
-                response_dict_for_model = {
-                    "issues": issues_response_list,
-                    "total": actual_total,
+                # Build request body for v3 API
+                fields_list = fields_param.split(",") if fields_param else ["id", "key"]
+                request_body: dict[str, Any] = {
+                    "jql": jql,
+                    "fields": fields_list,
                 }
+                # Note: v3 API uses 'expand' as a comma-separated string, not an array
+                if expand:
+                    request_body["expand"] = expand
+
+                # Fetch issues using v3 API with nextPageToken pagination
+                all_issues: list[dict[str, Any]] = []
+                next_page_token: str | None = page_token
+
+                while len(all_issues) < limit:
+                    # Only request the remaining count to avoid over-fetching.
+                    # This ensures the returned nextPageToken aligns with
+                    # the last issue we actually return to the caller.
+                    remaining = limit - len(all_issues)
+                    request_body["maxResults"] = min(remaining, 100)
+
+                    if next_page_token:
+                        request_body["nextPageToken"] = next_page_token
+
+                    response = self.jira.post(
+                        "rest/api/3/search/jql", json=request_body
+                    )
+
+                    if not isinstance(response, dict):
+                        msg = f"Unexpected response type from v3 search API: {type(response)}"
+                        logger.error(msg)
+                        raise TypeError(msg)
+
+                    issues = response.get("issues", [])
+                    all_issues.extend(issues)
+
+                    # Check for more pages
+                    next_page_token = response.get("nextPageToken")
+                    if not next_page_token:
+                        break
+
+                # Build response dict for model
+                # Note: v3 API doesn't provide total count, so we use -1
+                response_dict: dict[str, Any] = {
+                    "issues": all_issues[:limit],
+                    "total": -1,
+                    "startAt": 0,
+                    "maxResults": limit,
+                }
+                if next_page_token:
+                    response_dict["nextPageToken"] = next_page_token
 
                 search_result = JiraSearchResult.from_api_response(
-                    response_dict_for_model,
+                    response_dict,
                     base_url=self.config.url,
                     requested_fields=fields_param,
                 )
 
-                # Return the full search result object
                 return search_result
             else:
                 limit = min(limit, 50)
@@ -154,20 +199,8 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                 # Return the full search result object
                 return search_result
 
-        except HTTPError as http_err:
-            if http_err.response is not None and http_err.response.status_code in [
-                401,
-                403,
-            ]:
-                error_msg = (
-                    f"Authentication failed for Jira API ({http_err.response.status_code}). "
-                    "Token may be expired or invalid. Please verify credentials."
-                )
-                logger.error(error_msg)
-                raise MCPAtlassianAuthenticationError(error_msg) from http_err
-            else:
-                logger.error(f"HTTP error during API call: {http_err}", exc_info=False)
-                raise http_err
+        except HTTPError:
+            raise  # let decorator handle auth errors
         except Exception as e:
             logger.error(f"Error searching issues with JQL '{jql}': {str(e)}")
             raise Exception(f"Error searching issues: {str(e)}") from e
@@ -199,6 +232,9 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             Exception: If there is an error getting board issues
         """
         try:
+            # Sanitize JQL reserved words in project key values
+            jql = sanitize_jql_reserved_words(jql) or jql
+
             # Determine fields_param
             fields_param = fields
             if fields_param is None:
@@ -255,36 +291,17 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             JiraSearchResult object containing sprint issues and metadata
 
         Raises:
-            Exception: If there is an error getting board issues
+            Exception: If there is an error getting sprint issues
         """
         try:
-            # Determine fields_param
-            fields_param = fields
-            if fields_param is None:
-                fields_param = ",".join(DEFAULT_READ_JIRA_FIELDS)
-
-            response = self.jira.get_sprint_issues(
-                sprint_id=sprint_id,
+            # Use JQL search to get sprint issues with proper fields filtering
+            jql = f"sprint = {sprint_id}"
+            return self.search_issues(
+                jql=jql,
+                fields=fields,
                 start=start,
                 limit=limit,
             )
-            if not isinstance(response, dict):
-                msg = f"Unexpected return value type from `jira.get_sprint_issues`: {type(response)}"
-                logger.error(msg)
-                raise TypeError(msg)
-
-            # Convert the response to a search result model
-            search_result = JiraSearchResult.from_api_response(
-                response, base_url=self.config.url, requested_fields=fields_param
-            )
-            return search_result
-        except requests.HTTPError as e:
-            logger.error(
-                f"Error searching issues for sprint '{sprint_id}': {str(e.response.content)}"
-            )
-            raise Exception(
-                f"Error searching issues for sprint: {str(e.response.content)}"
-            ) from e
         except Exception as e:
-            logger.error(f"Error searching issues for sprint: {sprint_id}': {str(e)}")
+            logger.error(f"Error searching issues for sprint '{sprint_id}': {str(e)}")
             raise Exception(f"Error searching issues for sprint: {str(e)}") from e
